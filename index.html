@@ -235,6 +235,7 @@ canvas{display:block;}
   <div id="minimap"><canvas id="minimap-canvas" width="130" height="85"></canvas></div>
   <div id="online-count" style="display:none;position:fixed;top:10px;left:50%;transform:translateX(-50%);background:rgba(142,68,173,0.85);border:1px solid #d7bde2;border-radius:20px;padding:4px 14px;font-family:'Fredoka One',sans-serif;font-size:13px;color:#fff;z-index:20;pointer-events:none">🌐 1 online</div>
   <button id="gift-btn" onclick="openGiftUI()" style="display:none;position:fixed;top:10px;left:calc(50% + 90px);background:rgba(241,196,15,0.85);border:1px solid #f1c40f;border-radius:20px;padding:4px 14px;font-family:'Fredoka One',sans-serif;font-size:13px;color:#fff;z-index:20;cursor:pointer">🎁 Gift</button>
+  <button id="bat-btn" onclick="equipBat()" style="display:none;position:fixed;top:10px;left:calc(50% + 160px);background:rgba(231,76,60,0.85);border:1px solid #e74c3c;border-radius:20px;padding:4px 14px;font-family:'Fredoka One',sans-serif;font-size:13px;color:#fff;z-index:20;cursor:pointer">🏏 Bat</button>
 
   <div id="start-screen">
     <h1>⛵ SAIL FOR<br>BRAINROTS</h1>
@@ -484,6 +485,7 @@ const STRAWBERRY_ELEPHANT = {
 // STATE
 // ══════════════════════════════════════════════
 let G = {}, keys = {}, entities = [], particles = [], baseItems = [], islands = [], running = false;
+let droppedItems = [];
 let twoPlayer = false;
 let G2 = {};
 
@@ -1279,6 +1281,7 @@ window.addEventListener('keydown', e => {
   keys[e.code]=true;
   if(e.code==='Backquote') toggleAdmin();
   if(e.code==='KeyG' && running && !G.inWater && Math.abs(G.x - GARDEN_X) < 100 && Math.abs(G.y - GARDEN_Y) < 120) toggleGardenUI();
+  if(e.code==='KeyB' && running && onlineMode) equipBat();
 });
 window.addEventListener('keyup', e => {
   if (e.target.tagName === 'INPUT') return;
@@ -1665,6 +1668,10 @@ function update(dt) {
   updateCaretakers(dt);
   // ── MEDICAL FLIES ──
   updateMedFlies(dt);
+  // ── BAT ──
+  updateBat(dt);
+  // ── DROPPED ITEMS ──
+  updateDroppedItems(dt);
 
   // ── BASE ITEM INCOME ──
   for (const bi of baseItems) {
@@ -1999,7 +2006,9 @@ function drawWorld(cx, cy, offX, offY, vw, vh, player, otherPlayer) {
 
   drawBase(cx,cy);
   if (twoPlayer) drawBase2(cx,cy);
+  if (onlineMode) drawOtherBases(cx,cy);
   islands.forEach(isl => drawIsland(isl,cx,cy));
+  drawDroppedItems(cx,cy);
 
   // ENTITIES
   for (const e of entities) {
@@ -2357,6 +2366,8 @@ function drawBase(cx,cy) {
   drawCaretakers(cx, cy);
   // ── MEDICAL FLIES ──
   drawMedFlies(cx, cy);
+  // ── BAT ──
+  drawBat(cx, cy);
 
   // Base items display — with income pad and upgrade button
   for (let i=0;i<baseItems.length;i++) {
@@ -2924,7 +2935,7 @@ function adminGiveStrawberryElephant(){
 
 // Expose globals
 window.sellItem=sellItem; window.sellAll=sellAll; window.buySpeed=buySpeed;
-window.respawn=respawn; window.toggleAdmin=toggleAdmin;
+window.respawn=respawn; window.toggleAdmin=toggleAdmin; window.equipBat=equipBat;
 window.adminApply=adminApply; window.adminGiveCoins=adminGiveCoins;
 window.adminGiveSpeed=adminGiveSpeed;
 window.adminSetInvincible=adminSetInvincible;
@@ -3686,6 +3697,188 @@ function initFirebase() {
 const MY_ID = 'p_' + Math.random().toString(36).slice(2, 10);
 let onlineMode = false;
 let onlinePlayers = {};
+
+// Assign a stable base Y for this session based on MY_ID hash
+function idToBaseY(id) {
+  let hash = 0;
+  for (let i=0;i<id.length;i++) hash = (hash*31+id.charCodeAt(i))&0xffff;
+  // Spread bases vertically between 400 and WORLD_H-400
+  return 400 + (hash % (WORLD_H - 800));
+}
+const MY_BASE_Y = idToBaseY(MY_ID);
+
+// ── BAT SYSTEM ──
+let batEquipped = false;
+let batSwingTimer = 0;
+let batCooldown = 0;
+
+function updateDroppedItems(dt) {
+  for (let i = droppedItems.length-1; i >= 0; i--) {
+    const d = droppedItems[i];
+    d.timer -= dt;
+    if (d.timer <= 0) { droppedItems.splice(i,1); continue; }
+    // Player picks it up by walking over it
+    if (!G.heldItem && !G.heldPet && Math.hypot(G.x-d.x, G.y-d.y) < 30) {
+      if (d.isPet && d.pet) {
+        G.heldPet = {...d.pet, x:G.x, y:G.y, vx:0, vy:0, wanderTimer:0, mutateTimer:0};
+        spawnFloat('🏏 Picked up '+getPetType(d.pet.typeId)?.emoji+'!', G.x, G.y, '#2ecc71');
+      } else {
+        G.heldItem = { emoji: d.emoji, name: d.name, val: d.val||0 };
+        spawnFloat('🏏 Picked up '+d.emoji+'!', G.x, G.y, '#2ecc71');
+      }
+      droppedItems.splice(i,1);
+    }
+  }
+}
+
+function drawDroppedItems(cx, cy) {
+  droppedItems.forEach(d => {
+    const blink = d.timer < 3 ? Math.floor(d.timer*6)%2===0 : true;
+    if (!blink) return;
+    const x = d.x-cx, y = d.y-cy;
+    ctx.save();
+    ctx.font = '24px serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(d.emoji, x, y);
+    // Glow ring
+    ctx.strokeStyle='rgba(255,220,50,0.7)'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.arc(x, y, 18, 0, Math.PI*2); ctx.stroke();
+    ctx.font='bold 10px Fredoka One,sans-serif'; ctx.fillStyle='#f1c40f';
+    ctx.fillText('Walk to grab!', x, y+26);
+    ctx.restore();
+  });
+}
+
+function equipBat() {
+  batEquipped = !batEquipped;
+  spawnFloat(batEquipped ? '🏏 Bat equipped!' : '🏏 Bat put away', G.x, G.y, '#f39c12');
+}
+
+function updateBat(dt) {
+  if (batSwingTimer > 0) batSwingTimer -= dt;
+  if (batCooldown > 0) batCooldown -= dt;
+  if (!batEquipped || !onlineMode) return;
+  // Swing on Space
+  if (keys['Space'] && !G._spaceHeld && batCooldown <= 0) {
+    G._spaceHeld = true;
+    batSwingTimer = 0.3;
+    batCooldown = 1.0;
+    // Check all online players for hit
+    Object.entries(onlinePlayers).forEach(([id, p]) => {
+      const dist = Math.hypot(G.x - p.x, G.y - p.y);
+      if (dist < 60) {
+        // Send slap event
+        if (db) db.ref('slaps/' + id).set({
+          from: MY_ID, fromName: myLbName||'Sailor', ts: Date.now()
+        }).catch(()=>{});
+        spawnFloat('🏏 SLAP!', G.x, G.y, '#f39c12');
+      }
+    });
+  }
+  if (!keys['Space']) G._spaceHeld = false;
+}
+
+function drawBat(cx, cy) {
+  if (!batEquipped) return;
+  const px = G.x - cx, py = G.y - cy;
+  const swing = batSwingTimer > 0 ? Math.sin((1-batSwingTimer/0.3)*Math.PI) * 40 : 0;
+  ctx.save();
+  ctx.translate(px + G.facing*20, py - 10);
+  ctx.rotate(G.facing * (Math.PI/4 + swing * 0.05));
+  ctx.font = `${20 + swing*0.5}px serif`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('🏏', 0, 0);
+  ctx.restore();
+}
+
+function drawOtherBases(cx, cy) {
+  Object.entries(onlinePlayers).forEach(([id, p]) => {
+    const pBaseY = idToBaseY(id);
+    const bx = BASE_X - cx;
+    const by = pBaseY - cy;
+    if (bx < -300 || bx > canvas.width+300 || by < -300 || by > canvas.height+300) return;
+    const name = p.name || 'Sailor';
+
+    // Base platform
+    ctx.save();
+    ctx.fillStyle = 'rgba(155,89,182,0.15)';
+    ctx.strokeStyle = 'rgba(155,89,182,0.5)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    if(ctx.roundRect) ctx.roundRect(bx-120, by-80, 240, 160, 12);
+    else ctx.rect(bx-120, by-80, 240, 160);
+    ctx.fill(); ctx.stroke();
+
+    // Owner name
+    ctx.font = 'bold 12px Fredoka One,sans-serif';
+    ctx.fillStyle = '#c39bd3';
+    ctx.textAlign = 'center';
+    ctx.fillText("⚓ "+name+"'s Base", bx, by-90);
+
+    // View-only label
+    ctx.font = '9px Fredoka One,sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    ctx.fillText('👀 View only', bx, by-78);
+
+    // Draw their base items
+    if (p.baseItems) {
+      p.baseItems.slice(0,6).forEach((item, i) => {
+        const ix = bx - 80 + (i%3)*80, iy = by - 20 + Math.floor(i/3)*60;
+        ctx.font = '22px serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+        ctx.fillText(item.emoji, ix, iy);
+        ctx.font = '8px Fredoka One,sans-serif'; ctx.fillStyle='rgba(255,255,255,0.6)';
+        ctx.fillText('Lv'+( item.upgradeLevel||1), ix, iy+16);
+        ctx.fillStyle='#c39bd3';
+      });
+    }
+
+    // Draw their garden plots
+    if (p.gardenPlots) {
+      const gx = bx - 100, gy = by + 90;
+      ctx.font = '8px Fredoka One,sans-serif'; ctx.fillStyle='rgba(255,255,255,0.5)';
+      ctx.textAlign='center'; ctx.fillText('🌱 Garden', gx+50, gy-8);
+      p.gardenPlots.forEach((plot, i) => {
+        if (!plot || !plot.plantId) return;
+        const plant = getPlant(plot.plantId);
+        if (!plant) return;
+        const px2 = gx + (i%4)*26, py2 = gy + Math.floor(i/4)*26;
+        const s = Math.min(plot.size||1, 2);
+        ctx.font = `${Math.round(14*s*(0.4+((plot.stage||0)/3)*0.6))}px serif`;
+        ctx.textAlign='center'; ctx.textBaseline='middle';
+        ctx.fillText(plant.emoji, px2+10, py2+10);
+      });
+    }
+
+    // Draw their pets
+    if (p.pets) {
+      p.pets.slice(0,5).forEach((pet, i) => {
+        const type = getPetType(pet.typeId);
+        if (!type) return;
+        const petX = bx - 60 + i*30, petY = by + 75;
+        const s = Math.min(pet.size||1, 1.5);
+        ctx.font = `${Math.round(14*s)}px serif`;
+        ctx.textAlign='center'; ctx.textBaseline='middle';
+        if (pet.rainbow) ctx.filter=`hue-rotate(${(G.waveOffset*200)%360}deg)`;
+        ctx.fillText(type.emoji, petX, petY);
+        ctx.filter='none';
+      });
+    }
+
+    // Draw their caretakers
+    if (p.caretakers) {
+      p.caretakers.slice(0,4).forEach((ct, i) => {
+        const type = getCaretakerType(ct.typeId);
+        if (!type) return;
+        const ctX = bx - 90 + i*55, ctY = by + 60;
+        const h = Math.min(ct.height||1, 3);
+        ctx.font = `${Math.round(18*h)}px serif`;
+        ctx.textAlign='center'; ctx.textBaseline='bottom';
+        ctx.fillText(type.emoji, ctX, ctY);
+      });
+    }
+
+    ctx.restore();
+  });
+}
 let pushInterval = null;
 const ONLINE_TTL = 8000;
 
@@ -3694,6 +3887,7 @@ window.addEventListener('load', initFirebase);
 
 function pushMyPosition() {
   if (!running || !onlineMode || !db) return;
+  // Push position + full base snapshot
   db.ref('players/' + MY_ID).set({
     x: Math.round(G.x), y: Math.round(G.y),
     name: myLbName || 'Sailor',
@@ -3701,8 +3895,15 @@ function pushMyPosition() {
     inWater: G.inWater,
     onIsland: G.onIsland||false,
     heldItem: G.heldItem ? G.heldItem.emoji : null,
+    heldPet: G.heldPet ? getPetType(G.heldPet.typeId)?.emoji : null,
     dead: G.dead,
     ts: Date.now(),
+    // Base data for visiting
+    baseY: Math.round(G.baseY || BASE_Y),
+    baseItems: baseItems.map(b=>({emoji:b.emoji,name:b.name,upgradeLevel:b.upgradeLevel||1})).slice(0,20),
+    gardenPlots: gardenPlots.map(p=>p?{plantId:p.plantId,stage:p.stage,mutation:p.mutation,size:p.size,sizeLabel:p.sizeLabel}:null),
+    pets: pets.map(p=>({typeId:p.typeId,size:p.size,sizeLabel:p.sizeLabel,mutation:p.mutation,rainbow:p.rainbow})).slice(0,10),
+    caretakers: caretakers.map(c=>({typeId:c.typeId,height:c.height,heightLabel:c.heightLabel,rainbow:c.rainbow})).slice(0,10),
   }).catch(()=>{});
 }
 
@@ -3713,6 +3914,8 @@ function startOnlineMode() {
   if (hud) hud.style.display = 'block';
   const gb = document.getElementById('gift-btn');
   if (gb) gb.style.display = 'block';
+  const bb = document.getElementById('bat-btn');
+  if (bb) bb.style.display = 'block';
 
   // Realtime listener for all players
   db.ref('players').on('value', snap => {
@@ -3736,6 +3939,31 @@ function startOnlineMode() {
     Object.values(gifts).forEach(gift => receiveGift(gift));
   });
 
+  // Slap listener — someone hit us!
+  db.ref('slaps/' + MY_ID).on('value', snap => {
+    if (!onlineMode || !snap.val()) return;
+    db.ref('slaps/' + MY_ID).remove();
+    const slap = snap.val();
+    const fromName = slap.fromName || 'Someone';
+    // Drop held item so attacker can pick it up
+    if (G.heldItem) {
+      // Spawn it as a droppable on the ground
+      droppedItems.push({ emoji: G.heldItem.emoji, name: G.heldItem.name, val: G.heldItem.val||0, x: G.x + (Math.random()-0.5)*60, y: G.y + (Math.random()-0.5)*40, timer: 15 });
+      G.heldItem = null;
+    } else if (G.heldPet) {
+      droppedItems.push({ emoji: getPetType(G.heldPet.typeId)?.emoji||'🐾', name: 'Pet', isPet: true, pet: {...G.heldPet}, x: G.x+(Math.random()-0.5)*60, y: G.y+(Math.random()-0.5)*40, timer:15 });
+      G.heldPet = null;
+    }
+    // Knockback
+    G.vx += (Math.random()-0.5)*400;
+    G.vy += (Math.random()-0.5)*400;
+    spawnFloat('🏏 SLAPPED by '+fromName+'!', G.x, G.y, '#e74c3c');
+    showGiftNotif(fromName, '🏏 You got slapped!');
+  });
+
+  // Store my base Y so others know where it is
+  G.baseY = MY_BASE_Y;
+
   pushMyPosition();
   pushInterval = setInterval(pushMyPosition, 150);
 }
@@ -3753,6 +3981,8 @@ function stopOnlineMode() {
   if (hud) hud.style.display = 'none';
   const gb = document.getElementById('gift-btn');
   if (gb) gb.style.display = 'none';
+  const bb = document.getElementById('bat-btn');
+  if (bb) bb.style.display = 'none';
 }
 
 window.addEventListener('beforeunload', () => { if (onlineMode) stopOnlineMode(); });
